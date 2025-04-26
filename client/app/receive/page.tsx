@@ -37,6 +37,8 @@ export default function ReceivePage() {
   const reconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 5;
   const RECONNECT_DELAY = 3000;
+  // Flag to track if we've already initiated file completion
+  const completingTransferRef = useRef(false);
 
   const handleFileInfo = (data: { name: string; size: number }) => {
     const fileInfo = {
@@ -46,10 +48,10 @@ export default function ReceivePage() {
     setFileMetadata(fileInfo);
     fileSizeRef.current = data.size; // Update the ref
     receivedChunksRef.current = [];
-    // setReceivedBytes(0);
     receivedBytes.current = 0;
     setTransferProgress(0);
     setError(null);
+    completingTransferRef.current = false;
   };
 
   const handleReceivedChunk = (chunkData: ArrayBuffer) => {
@@ -58,7 +60,6 @@ export default function ReceivePage() {
     }
     receivedChunksRef.current.push(chunkData);
     const newReceivedBytes = receivedBytes.current + chunkData.byteLength;
-    // setReceivedBytes(newReceivedBytes);
     receivedBytes.current = newReceivedBytes;
 
     // Calculate progress using the ref instead of state
@@ -68,6 +69,13 @@ export default function ReceivePage() {
         Math.floor((newReceivedBytes / fileSizeRef.current) * 100)
       );
       setTransferProgress(progress);
+      
+      // Only attempt completion if not already in progress and we've reached threshold
+      if (!fileUrl && !completingTransferRef.current && newReceivedBytes >= fileSizeRef.current * 0.99) {
+        console.log("Received 99% of file, initiating completion process");
+        completingTransferRef.current = true;
+        setTimeout(() => completeFileTransfer(), 300);
+      }
     }
   };
 
@@ -76,82 +84,136 @@ export default function ReceivePage() {
       return;
     }
 
+    console.log("Connect to server button clicked");
     setIsConnecting(true);
     setError(null);
 
     receivedChunksRef.current = [];
-    // setReceivedBytes(0)
     receivedBytes.current = 0;
     setTransferProgress(0);
+    completingTransferRef.current = false;
 
-    const ws = new WebSocket(`ws:://${window.location.hostname}:8000/ws`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      reconnectAttemptsRef.current = 0;
-      const connectionId =
-        typeof crypto.randomUUID === "function"
+    // Direct connection to the known working server
+    const wsUrl = 'ws://localhost:3000/ws';
+    console.log("Connecting directly to:", wsUrl);
+    
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      
+      ws.onopen = () => {
+        console.log(`✅ Connection successful with: ${wsUrl}`);
+        
+        // Generate a unique connection ID
+        const connectionId = typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
           : "fallback-" + Math.random().toString(36).substring(2, 15);
-      ws.send(
-        JSON.stringify({
-          type: "register",
-          connectionId: connectionId,
-        })
-      );
-      ws.send(
-        JSON.stringify({
-          target_ud: senderId,
+        
+        console.log("Registering with connection ID:", connectionId);
+        ws.send(
+          JSON.stringify({
+            type: "register",
+            connectionId: connectionId,
+          })
+        );
+        
+        // Important: Send receiver-ready message that matches sender expectations
+        // This message is critical for the handshake to work properly
+        console.log("Sending receiver-ready with target:", senderId);
+        
+        // Send in exact format expected by sender, with all required fields
+        const readyMsg = {
           type: "receiver-ready",
-          senderId: connectionId,
-        })
-      );
-      setIsConnected(true);
+          senderId: senderId,
+          target_id: senderId,
+          receiverId: connectionId
+        };
+        console.log("Ready message payload:", JSON.stringify(readyMsg));
+        ws.send(JSON.stringify(readyMsg));
+        
+        // Send another ready signal after a short delay in case the first one was missed
+        setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            console.log("Sending follow-up ready signal");
+            ws.send(JSON.stringify(readyMsg));
+          }
+        }, 1000);
+        
+        // Setup ping interval to keep connection alive
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            console.log("Sending ping to keep connection alive");
+            ws.send(JSON.stringify({ type: "ping" }));
+          } else {
+            clearInterval(pingInterval);
+          }
+        }, 15000);
+        
+        setIsConnected(true);
+        setIsConnecting(false);
+        setupWebSocketHandlers(ws);
+      };
+      
+      ws.onerror = (event) => {
+        console.error("WebSocket connection error:", event);
+        setIsConnected(false);
+        setIsConnecting(false);
+        setError("Failed to connect to WebSocket server. Please try again.");
+      };
+    } catch (err) {
+      console.error("Error creating WebSocket:", err);
       setIsConnecting(false);
-    };
+      setError(`Connection error: ${err.message}`);
+    }
+  };
+
+  const setupWebSocketHandlers = (ws) => {
     ws.onmessage = (event) => {
       if (typeof event.data === "string") {
         try {
           const data = JSON.parse(event.data);
+          console.log("Received message:", data);
 
           if (data.type === "file-info") {
             handleFileInfo(data);
           } else if (data.type === "file-chunk") {
-            const expectedSize = data.totalBytes || fileMetadata?.size || 0;
-
-            setTimeout(() => {
-              if (receivedBytes.current < expectedSize *0.95) {
-                completeFileTransfer();
-              }
-            }, 500);
+            // No need to check completion here as it's now handled in handleReceivedChunk
+            console.log("Received file chunk metadata");
+          } else if (data.type === "transfer-complete") {
+            console.log("Server signaled transfer completion");
+            completeFileTransfer();
           }
         } catch (e) {
-          console.error("Error processing message :", e);
+          console.error("Error processing message:", e);
         }
-      }else if (event.data instanceof ArrayBuffer) {
+      } else if (event.data instanceof ArrayBuffer) {
           handleReceivedChunk(event.data);
-      }else if (event.data instanceof Blob) {
+      } else if (event.data instanceof Blob) {
           const reader = new FileReader();
           reader.onload = (e) => {
             if (reader.result) {
               handleReceivedChunk(reader.result as ArrayBuffer);
             }
           };
+          reader.onerror = (error) => {
+            console.error("Error reading blob data:", error);
+            setError("Failed to process received file chunk");
+          };
           reader.readAsArrayBuffer(event.data);
       }
     };
-    ws.onerror = (event) => {
-      console.error("WebSocket error:", event);
-      setError("Connection error. Please try again.");
-      setIsConnecting(false);
-    };
+    
     ws.onclose = (event) => {
       setIsConnected(false);
       setIsConnecting(false);
-      if (event.code !== 1000) {
-        console.error("WebSocket closed unexpectedly:", event);
+      console.log(`WebSocket closed with code ${event.code}`);
+      
+      // Don't attempt to reconnect if we already have the file or we're closing normally
+      if (event.code !== 1000 && !fileUrl) {
+        console.warn("WebSocket closed unexpectedly:", event);
         if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
           reconnectAttemptsRef.current++;
+          console.log(`Reconnecting attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`);
           setTimeout(() => {
             connectWebSocket();
           }, RECONNECT_DELAY);
@@ -159,8 +221,7 @@ export default function ReceivePage() {
           setError("Failed to reconnect after multiple attempts.");
         }
       }
-    }
-
+    };
   };
 
   const completeFileTransfer = () => {
@@ -180,10 +241,44 @@ export default function ReceivePage() {
 
       const url = URL.createObjectURL(blob);
       setFileUrl(url);
+      
+      // Important: Send confirmation back to sender that we've received the file
+      // This helps unblock the sender who's waiting for recipient connection
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        console.log("Sending transfer-complete confirmation back to sender");
+        wsRef.current.send(JSON.stringify({
+          type: "transfer-complete",
+          target_id: senderId,
+          success: true,
+          size: blob.size,
+          receivedChunks: receivedChunksRef.current.length
+        }));
+        
+        // Send notification again after a short delay in case the first was missed
+        setTimeout(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              type: "transfer-complete",
+              target_id: senderId,
+              success: true
+            }));
+          }
+        }, 500);
+      }
 
       setError(null);
     } catch (e) {
-      console.error(`Error completing transfer: ${e}`, true);
+      console.error(`Error completing transfer: ${e}`);
+      setError(`Failed to process file: ${e.message}`);
+      
+      // Also notify sender about failure if possible
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "transfer-error",
+          target_id: senderId,
+          error: e.message
+        }));
+      }
     }
   };
 
@@ -196,17 +291,27 @@ export default function ReceivePage() {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    // Consider revoking the object URL after download
+    
+    // Revoke the object URL after download to free memory
+    setTimeout(() => {
+      URL.revokeObjectURL(fileUrl);
+      console.log("File URL revoked after download");
+    }, 1000);
   };
 
   // Clean up WebSocket connection on unmount
   useEffect(() => {
+    // Try to connect automatically if we have sender ID
+    if (senderId && !isConnected && !isConnecting) {
+      connectWebSocket();
+    }
+    
     return () => {
       if (wsRef.current) {
         wsRef.current.close();
       }
     };
-  }, []);
+  }, [senderId]);
 
   return (
     <div className="min-h-screen flex flex-col">
