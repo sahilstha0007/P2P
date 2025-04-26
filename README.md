@@ -1,4 +1,4 @@
-# 🚀 P2P File Transfer Frontend (Next.js)  
+<!-- # 🚀 P2P File Transfer Frontend (Next.js)  
 
 This is the frontend of the **P2P File Transfer** project built using **Next.js 13**. It allows users to send and receive files seamlessly over WebSockets with a Rust-based **Axum** backend.  
 
@@ -58,4 +58,4 @@ This frontend is designed to work with the Rust (Axum) WebSocket server. Make su
 
 ## ☕ Support the Project
 If you find this project helpful, consider buying me a coffee!
-[Buy Me a Coffee](https://buymeacoffee.com/aarambhdevhub)
+[Buy Me a Coffee](https://buymeacoffee.com/aarambhdevhub) -->
